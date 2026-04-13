@@ -88,17 +88,22 @@
                             <option value="zhipu">Zhipu (智谱 GLM)</option>
                             <option value="openai">OpenAI (GPT)</option>
                             <option value="gemini">Google (Gemini)</option>
-                            <option value="coren">Coren API (非公开-自有)</option>
+                            <option value="customopenai">自定义 OpenAI 格式</option>
                         </select>
                     </div>
                     <div class="input-group api-url-group hidden">
                          <label for="api-url">API 地址:</label>
-                         <input type="text" id="api-url" placeholder="https://api.coren.xin/query">
+                         <input type="text" id="api-url" placeholder="https://your-api.com/v1/chat/completions">
                     </div>
                     <div class="input-group">
                         <label for="api-key" id="api-key-label">API Key:</label>
                         <input type="password" id="api-key" placeholder="在此输入你的API Key">
                     </div>
+                    <div class="input-group" id="custom-model-group" style="display: none;">
+                        <label for="custom-model">模型名称: <span style="color: red;">*</span></label>
+                        <input type="text" id="custom-model" placeholder="如: gpt-3.5-turbo / qwen2.5">
+                    </div>
+                    <button id="test-api-button" style="padding: 8px; background-color: #6c757d; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px;">测试连接</button>
                 </div>
                 <button id="start-button">开始自动答题</button>
                 <div id="status-log">状态日志...</div>
@@ -124,6 +129,9 @@
     const fallbackAiCheckbox = document.getElementById('fallback-ai');
     const refreshQuizbankButton = document.getElementById('refresh-quizbank');
     const stopConditionSelect = document.getElementById('stop-condition');
+    const customModelGroup = document.getElementById('custom-model-group');
+    const customModelInput = document.getElementById('custom-model');
+    const testApiButton = document.getElementById('test-api-button');
 
     let isPanelVisible = false;
     let autoMode = false;
@@ -162,10 +170,13 @@
             }),
             parseResponse: (data) => data.candidates?.[0]?.content?.parts?.[0]?.text
         },
-        coren: {
-            name: "Coren API (自有)",
-            requiresApiUrl: true, // 特殊标记，需要显示URL输入框
-            parseResponse: (data) => (data.code === 0 && data.data) ? data.data.answer : null
+        customopenai: {
+            name: "自定义 OpenAI 格式",
+            requiresApiUrl: true,
+            url: "",
+            buildHeaders: (key) => ({ "Content-Type": "application/json", "Authorization": `Bearer ${key}` }),
+            buildPayload: (messages, model) => ({ model: model, messages, max_tokens: 50, temperature: 0 }),
+            parseResponse: (data) => data.choices?.[0]?.message?.content
         }
     };
 
@@ -193,7 +204,7 @@
         GM_setValue('api_provider', savedProvider);
     }
     providerSelect.value = savedProvider;
-    apiUrlInput.value = GM_getValue('api_url', 'https://api.coren.xin/query');
+    apiUrlInput.value = GM_getValue('api_url', 'https://your-api.com/v1/chat/completions');
     const allApiKeys = getStoredApiKeys();
     apiKeyInput.value = allApiKeys[savedProvider] || '';
     // 加载题库设置
@@ -219,6 +230,11 @@
                 apiUrlGroup.classList.remove('hidden');
             } else {
                 apiUrlGroup.classList.add('hidden');
+            }
+            if (providerKey === 'customopenai') {
+                customModelGroup.style.display = 'flex';
+            } else {
+                customModelGroup.style.display = 'none';
             }
         } else if (mode === 'quizbank') {
             quizbankSettings.classList.remove('hidden');
@@ -251,6 +267,12 @@
         GM_setValue('api_url', apiUrlInput.value);
     });
 
+    customModelInput.addEventListener('input', () => {
+        GM_setValue('custom_model', customModelInput.value);
+    });
+
+    customModelInput.value = GM_getValue('custom_model', '');
+
     // 题库事件监听
     quizbankUrlInput.addEventListener('input', () => {
         GM_setValue('quizbank_url', quizbankUrlInput.value);
@@ -266,6 +288,7 @@
 
     refreshQuizbankButton.addEventListener('click', fetchQuizBank);
 
+    testApiButton.addEventListener('click', testApiConnection);
 
     startButton.addEventListener('click', () => toggleAutoMode(!autoMode));
     updateUIVisibility();
@@ -387,6 +410,83 @@
         });
     }
 
+    function testApiConnection() {
+        const providerKey = providerSelect.value;
+        const apiKey = apiKeyInput.value;
+        const apiUrl = apiUrlInput.value;
+        const providerConfig = API_PROVIDERS[providerKey];
+
+        if (!apiKey) { log('测试失败: 请输入 API Key'); return; }
+        if (!providerConfig) { log(`测试失败: 未知的服务商: ${providerKey}`); return; }
+
+        if (providerKey === 'customopenai') {
+            if (!apiUrl) { log('测试失败: 请输入 API 地址'); return; }
+            const model = customModelInput.value.trim();
+            if (!model) { log('测试失败: 请输入模型名称'); return; }
+        }
+
+        log(`正在测试 ${providerConfig.name} 连接...`);
+
+        const testQuestion = "1+1=?";
+        const testOptions = ["2", "3", "4", "5"];
+        const testPrompt = `你是一个专业的在线课程答题助手。请根据以下题目和选项，直接给出正确答案的字母。规则：1.  **这是一个单选题。** 2.  **直接返回代表正确选项的字母，不要包含任何其他解释、标点符号或文字。** -   例如：如果答案是A，就返回 "A"。---题目: ${testQuestion}---选项:${testOptions.map((opt, index) => `${String.fromCharCode(65 + index)}. ${opt}`).join('\n')}---你的答案 (仅字母):`;
+        const messages = [{ "role": "user", "content": testPrompt }];
+
+        let url, headers, data, method = "POST";
+
+        if (providerKey === 'customopenai') {
+            url = apiUrl;
+            headers = providerConfig.buildHeaders(apiKey);
+            const model = customModelInput.value.trim();
+            data = JSON.stringify(providerConfig.buildPayload(messages, model));
+        } else {
+            url = typeof providerConfig.url === 'function' ? providerConfig.url(apiKey) : providerConfig.url;
+            headers = providerConfig.buildHeaders(apiKey);
+            data = JSON.stringify(providerConfig.buildPayload(messages));
+        }
+
+        testApiButton.disabled = true;
+        testApiButton.textContent = '测试中...';
+
+        GM_xmlhttpRequest({
+            method,
+            url,
+            headers,
+            data,
+            timeout: 15000,
+            onload: function (response) {
+                testApiButton.disabled = false;
+                testApiButton.textContent = '测试连接';
+
+                if (response.status >= 200 && response.status < 300) {
+                    try {
+                        const responseData = JSON.parse(response.responseText);
+                        const content = providerConfig.parseResponse(responseData);
+                        if (content !== null) {
+                            log(`✅ 连接成功! AI 回答: ${content.trim()}`);
+                        } else {
+                            log(`❌ 连接失败: ${responseData.message || '响应格式错误'}`);
+                        }
+                    } catch (e) {
+                        log(`❌ 连接失败: 解析响应失败 - ${e.message}`);
+                    }
+                } else {
+                    log(`❌ 连接失败: HTTP ${response.status} ${response.statusText}`);
+                }
+            },
+            onerror: (error) => {
+                testApiButton.disabled = false;
+                testApiButton.textContent = '测试连接';
+                log(`❌ 连接失败: ${error.statusText || '网络错误'}`);
+            },
+            ontimeout: () => {
+                testApiButton.disabled = false;
+                testApiButton.textContent = '测试连接';
+                log(`❌ 连接失败: 请求超时 (15秒)`);
+            }
+        });
+    }
+
     function callAiApi(question, options, type, aiMode) {
         return new Promise((resolve) => {
             // aiMode: 'free' or 'custom'
@@ -408,16 +508,13 @@
                 if (!apiKey) { log('错误: AI 模式下必须提供API Key'); return resolve(null); }
                 if (!providerConfig) { log(`错误: 未知的服务商: ${providerKey}`); return resolve(null); }
 
-                if (providerKey === 'coren') {
+                if (providerKey === 'customopenai') {
                     const apiUrl = apiUrlInput.value;
-                    if (!apiUrl) { log('错误: Coren API 模式下必须提供API地址'); return resolve(null); }
-                    const typeMap = { '多选题': 'multiple', '单选题': 'single', '判断题': 'judgement', '填空题': 'completion' };
-                    const englishType = typeMap[type] || 'default';
-                    const params = new URLSearchParams({ token: apiKey, title: question, options: options.map((opt, index) => `${String.fromCharCode(65 + index)}. ${opt}`).join('\n'), type: englishType });
-                    url = `${apiUrl.split('?')[0]}?${params.toString()}`;
-                    method = "GET";
-                    headers = {};
-                    data = undefined;
+                    if (!apiUrl) { log('错误: 自定义 OpenAI 模式下必须提供API地址'); return resolve(null); }
+                    url = apiUrl;
+                    headers = providerConfig.buildHeaders(apiKey);
+                    const model = GM_getValue('custom_model', 'gpt-3.5-turbo');
+                    data = JSON.stringify(providerConfig.buildPayload(messages, model));
                 } else {
                     url = typeof providerConfig.url === 'function' ? providerConfig.url(apiKey) : providerConfig.url;
                     headers = providerConfig.buildHeaders(apiKey);
@@ -440,11 +537,7 @@
 
                             if (content !== null) {
                                 let answer = content.trim();
-                                // Coren API 的判断题直接返回"对""错"，其他API返回A/B，需要统一处理
-                                // 其他所有API返回的答案都清理成纯字母
-                                if (providerSelect.value !== 'coren' || type !== '判断题') {
-                                    answer = answer.toUpperCase().replace(/[^A-Z]/g, '');
-                                }
+                                answer = answer.toUpperCase().replace(/[^A-Z]/g, '');
                                 log(`AI 回答: ${answer}`);
                                 resolve(answer);
                             } else {
